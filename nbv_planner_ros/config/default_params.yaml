@@ -1,0 +1,63 @@
+# NBV Planner ROS 2 parameters
+# Override these for your specific robot/camera setup.
+
+nbv_planner:
+  ros__parameters:
+
+    # ── Scene ────────────────────────────────────────────────────────
+    # mesh_file_path (required): Path to .ply mesh of the target object.
+    # The planner needs a mesh for raycasting-based depth simulation.
+    mesh_file_path: ""
+
+    # points_file_path (optional): Path to .npy with pre-computed ground
+    # truth points (N,3). If empty, points are sampled from the mesh.
+    points_file_path: ""
+
+    # normals_file_path (optional): Path to .npy with surface normals (N,3).
+    # If empty and points_file_path is set, normals are estimated from mesh.
+    normals_file_path: ""
+
+    scene_name: "custom_scene"
+    num_sample_points: 50000
+
+    # ── Camera (match your depth sensor) ─────────────────────────────
+    camera:
+      width: 640
+      height: 480
+      horizontal_fov_deg: 87.0    # RealSense D435 default
+      vertical_fov_deg: 58.0
+      min_depth: 0.1              # meters
+      max_depth: 1.0              # meters
+      depth_noise_coeff: 0.001    # sigma_z = coeff * z^2
+      planning_subsample: 4       # downsample factor for fast scoring
+
+    # ── Workspace (match your KUKA Med 7 setup) ─────────────────────
+    # Camera convention: Z-forward, X-right, Y-down (optical frame).
+    # Poses are published as T_world_cam in the output frame_id.
+    workspace:
+      base_position: [0.0, -0.5, 0.3]    # robot base in world frame
+      inner_radius: 0.3                    # min reach (meters)
+      outer_radius: 0.8                    # max reach (meters)
+      min_camera_angle_to_target: 0.5      # cos(angle) threshold
+      object_center: [0.0, 0.0, 0.0]      # [0,0,0] = auto from scene
+      forbidden_zone_min: [-1.0, -1.0, -0.05]
+      forbidden_zone_max: [1.0, 1.0, 0.0]
+      use_forbidden_zone: true
+
+    # ── Planner ──────────────────────────────────────────────────────
+    planner:
+      method: "greedy"            # "greedy" or "sequence_optimized"
+      max_views: 20
+      num_candidates: 300         # candidates per iteration
+      convergence_threshold: 0.01 # greedy only: stop when gain < threshold
+      coverage_weight: 1.0        # alpha: weight for new point discovery
+      density_weight: 0.1         # beta: weight for total visible points
+      neighbor_threshold: 0.003   # coverage distance threshold (meters)
+      min_angular_separation_deg: 15.0  # sequence_optimized only
+      random_seed: 42
+
+    # ── Output ───────────────────────────────────────────────────────
+    output:
+      waypoints_topic: "/nbv_waypoints"
+      coverage_topic: "/nbv_coverage"
+      frame_id: "base_link"
