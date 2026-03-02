@@ -162,9 +162,18 @@ class NbvPlannerNode(Node):
 
         if points_path:
             self.get_logger().info(f"Loading ground truth points from: {points_path}")
-            points = np.load(points_path)
+            points = np.load(points_path, allow_pickle=True)
+            # Handle object arrays (e.g. saved with allow_pickle=True)
+            if points.dtype == object:
+                points = np.array(points.tolist(), dtype=np.float64)
+            points = np.asarray(points, dtype=np.float64)
+            if points.ndim == 1:
+                points = points.reshape(-1, 3)
             if normals_path:
-                normals = np.load(normals_path)
+                normals = np.load(normals_path, allow_pickle=True)
+                if normals.dtype == object:
+                    normals = np.array(normals.tolist(), dtype=np.float64)
+                normals = np.asarray(normals, dtype=np.float64)
             else:
                 self.get_logger().info(
                     "No normals file provided, estimating from mesh faces."
