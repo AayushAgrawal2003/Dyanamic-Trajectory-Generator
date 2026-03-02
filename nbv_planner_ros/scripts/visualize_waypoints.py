@@ -12,11 +12,15 @@ import argparse
 import sys
 
 import numpy as np
-import open3d as o3d
+import matplotlib
+matplotlib.use("TkAgg")  # force interactive backend
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection, Line3DCollection
 from scipy.spatial.transform import Rotation
 
 
-def load_waypoints_7(path: str) -> np.ndarray:
+def load_waypoints_7(path: str) -> list:
     """Load (N,7) waypoints [x, y, z, qx, qy, qz, qw] -> list of 4x4."""
     data = np.load(path)
     assert data.ndim == 2 and data.shape[1] == 7, \
@@ -38,53 +42,83 @@ def load_waypoints_4x4(path: str) -> list:
     return [np.linalg.inv(T) for T in data]
 
 
-def create_camera_frustum(T_world_cam: np.ndarray, scale: float = 0.04,
-                          color: list = None) -> o3d.geometry.LineSet:
-    """Create a wireframe camera frustum at the given pose."""
-    # Frustum corners in camera frame (Z-forward, X-right, Y-down)
+def load_ply_points(path: str) -> np.ndarray:
+    """Load points from a PLY file using trimesh or open3d."""
+    try:
+        import open3d as o3d
+        # Try as point cloud first
+        pcd = o3d.io.read_point_cloud(path)
+        pts = np.asarray(pcd.points)
+        if len(pts) > 0:
+            return pts
+        # Try as mesh
+        mesh = o3d.io.read_triangle_mesh(path)
+        return np.asarray(mesh.vertices)
+    except ImportError:
+        pass
+
+    try:
+        import trimesh
+        loaded = trimesh.load(path)
+        if hasattr(loaded, 'vertices'):
+            return np.asarray(loaded.vertices)
+    except ImportError:
+        pass
+
+    print(f"WARNING: Cannot load {path} (install open3d or trimesh)")
+    return np.zeros((0, 3))
+
+
+def draw_frustum(ax, T_world_cam, scale=0.04, color='green', alpha=0.6):
+    """Draw a camera frustum on a matplotlib 3D axis."""
     s = scale
     pts_cam = np.array([
-        [0, 0, 0],           # camera center
-        [-s, -s * 0.75, 2 * s],  # top-left
-        [s, -s * 0.75, 2 * s],   # top-right
-        [s, s * 0.75, 2 * s],    # bottom-right
-        [-s, s * 0.75, 2 * s],   # bottom-left
+        [0, 0, 0],              # camera center
+        [-s, -s * 0.75, 2 * s], # top-left
+        [ s, -s * 0.75, 2 * s], # top-right
+        [ s,  s * 0.75, 2 * s], # bottom-right
+        [-s,  s * 0.75, 2 * s], # bottom-left
     ])
 
-    # Transform to world frame
     R = T_world_cam[:3, :3]
     t = T_world_cam[:3, 3]
-    pts_world = (R @ pts_cam.T).T + t
+    pts = (R @ pts_cam.T).T + t
 
-    lines = [
-        [0, 1], [0, 2], [0, 3], [0, 4],  # edges from center
-        [1, 2], [2, 3], [3, 4], [4, 1],  # frame rectangle
-    ]
+    # Edges from center to corners
+    for i in range(1, 5):
+        ax.plot3D(*zip(pts[0], pts[i]), color=color, linewidth=1.0, alpha=alpha)
 
-    ls = o3d.geometry.LineSet()
-    ls.points = o3d.utility.Vector3dVector(pts_world)
-    ls.lines = o3d.utility.Vector2iVector(lines)
-    if color:
-        ls.paint_uniform_color(color)
-    return ls
+    # Rectangle
+    rect = [pts[1], pts[2], pts[3], pts[4], pts[1]]
+    for j in range(4):
+        ax.plot3D(*zip(rect[j], rect[j + 1]), color=color, linewidth=1.0, alpha=alpha)
+
+    # Draw Z-axis arrow (camera look direction)
+    look_len = 2.5 * s
+    look_end = t + R[:, 2] * look_len
+    ax.plot3D(*zip(t, look_end), color=color, linewidth=0.5, alpha=0.4)
 
 
-def create_trajectory_line(poses: list, color: list = None) -> o3d.geometry.LineSet:
-    """Create a line connecting waypoint positions in order."""
-    positions = np.array([T[:3, 3] for T in poses])
-    lines = [[i, i + 1] for i in range(len(positions) - 1)]
-
-    ls = o3d.geometry.LineSet()
-    ls.points = o3d.utility.Vector3dVector(positions)
-    ls.lines = o3d.utility.Vector2iVector(lines)
-    if color:
-        ls.paint_uniform_color(color)
-    return ls
+def set_equal_aspect(ax, points):
+    """Set equal aspect ratio for 3D plot based on data bounds."""
+    if len(points) == 0:
+        return
+    mins = points.min(axis=0)
+    maxs = points.max(axis=0)
+    center = (mins + maxs) / 2
+    max_range = (maxs - mins).max() / 2
+    if max_range < 1e-6:
+        max_range = 1.0
+    # Add 20% padding
+    max_range *= 1.2
+    ax.set_xlim(center[0] - max_range, center[0] + max_range)
+    ax.set_ylim(center[1] - max_range, center[1] + max_range)
+    ax.set_zlim(center[2] - max_range, center[2] + max_range)
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Visualize NBV waypoints with Open3D"
+        description="Visualize NBV waypoints with matplotlib"
     )
     parser.add_argument("waypoints_npy", help="Path to waypoints .npy file")
     parser.add_argument("--mesh", "-m", default="",
@@ -95,6 +129,8 @@ def main():
                         help="Camera frustum size (default: 0.04)")
     parser.add_argument("--no-numbers", action="store_true",
                         help="Don't print waypoint numbering to console")
+    parser.add_argument("--subsample", type=int, default=5000,
+                        help="Max points to display from mesh (default: 5000)")
     args = parser.parse_args()
 
     # Load waypoints
@@ -111,98 +147,91 @@ def main():
             pos = T[:3, 3]
             print(f"  [{i:2d}] x={pos[0]:+.4f}  y={pos[1]:+.4f}  z={pos[2]:+.4f}")
 
-    # Build visualization
-    geometries = []
+    # Extract positions
+    positions = np.array([T[:3, 3] for T in poses])
 
-    # Coordinate frame at origin
-    axes = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
-    geometries.append(axes)
+    # ── Plot ──────────────────────────────────────────────────────────
+    fig = plt.figure(figsize=(14, 10))
+    ax = fig.add_subplot(111, projection='3d')
 
-    # Load mesh / point cloud if provided
+    all_plot_points = [positions]
+
+    # Load and plot mesh points if provided
     if args.mesh:
         print(f"\nLoading mesh/cloud: {args.mesh}")
-        # Try as mesh first, fall back to point cloud
-        mesh = o3d.io.read_triangle_mesh(args.mesh)
-        if len(mesh.triangles) > 0:
-            mesh.compute_vertex_normals()
-            mesh.paint_uniform_color([0.7, 0.7, 0.7])
-            geometries.append(mesh)
-            print(f"  Mesh: {len(mesh.vertices)} vertices, "
-                  f"{len(mesh.triangles)} triangles")
-        else:
-            pcd = o3d.io.read_point_cloud(args.mesh)
-            if len(pcd.points) > 0:
-                if not pcd.has_colors():
-                    pcd.paint_uniform_color([0.5, 0.5, 0.5])
-                geometries.append(pcd)
-                print(f"  Point cloud: {len(pcd.points)} points")
+        mesh_pts = load_ply_points(args.mesh)
+        if len(mesh_pts) > 0:
+            print(f"  {len(mesh_pts)} points loaded")
+            # Subsample for plotting speed
+            if len(mesh_pts) > args.subsample:
+                idx = np.random.default_rng(0).choice(
+                    len(mesh_pts), args.subsample, replace=False
+                )
+                mesh_pts_plot = mesh_pts[idx]
             else:
-                print(f"  WARNING: {args.mesh} has no geometry")
+                mesh_pts_plot = mesh_pts
+            ax.scatter(
+                mesh_pts_plot[:, 0], mesh_pts_plot[:, 1], mesh_pts_plot[:, 2],
+                c='gray', s=0.3, alpha=0.3, label='Object'
+            )
+            all_plot_points.append(mesh_pts_plot)
+        else:
+            print(f"  WARNING: no geometry in {args.mesh}")
 
-    # Camera frustums with color gradient (green -> red)
+    # Color gradient: green -> red
     n = len(poses)
-    for i, T in enumerate(poses):
+    colors = []
+    for i in range(n):
         t = i / max(n - 1, 1)
-        color = [t, 1.0 - t, 0.2]  # green at start, red at end
-        frustum = create_camera_frustum(T, scale=args.frustum_scale, color=color)
-        geometries.append(frustum)
+        colors.append((t, 1.0 - t, 0.2))
 
-        # Small sphere at camera position
-        sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.003)
-        sphere.translate(T[:3, 3])
-        sphere.paint_uniform_color(color)
-        geometries.append(sphere)
+    # Draw frustums
+    for i, T in enumerate(poses):
+        draw_frustum(ax, T, scale=args.frustum_scale, color=colors[i])
+
+    # Camera position spheres
+    ax.scatter(
+        positions[:, 0], positions[:, 1], positions[:, 2],
+        c=colors, s=40, edgecolors='black', linewidths=0.5,
+        zorder=5, label='Waypoints'
+    )
+
+    # Waypoint index labels
+    for i, pos in enumerate(positions):
+        ax.text(pos[0], pos[1], pos[2], f' {i}', fontsize=7,
+                color='black', ha='left', va='bottom')
 
     # Trajectory line
-    traj = create_trajectory_line(poses, color=[1.0, 0.5, 0.0])
-    geometries.append(traj)
+    ax.plot(
+        positions[:, 0], positions[:, 1], positions[:, 2],
+        color='orange', linewidth=2.0, alpha=0.8, label='Trajectory'
+    )
 
-    # Compute scene bounding box to set a good initial viewpoint
-    all_points = []
-    for g in geometries:
-        if hasattr(g, 'points') and len(g.points) > 0:
-            all_points.append(np.asarray(g.points))
-        if hasattr(g, 'vertices') and len(g.vertices) > 0:
-            all_points.append(np.asarray(g.vertices))
-    if all_points:
-        all_pts = np.vstack(all_points)
-        center = all_pts.mean(axis=0)
-        extent = np.linalg.norm(all_pts.max(axis=0) - all_pts.min(axis=0))
-    else:
-        center = np.zeros(3)
-        extent = 1.0
+    # Origin coordinate frame
+    origin = np.zeros(3)
+    axis_len = 0.08
+    ax.quiver(*origin, axis_len, 0, 0, color='red', arrow_length_ratio=0.15, linewidth=2)
+    ax.quiver(*origin, 0, axis_len, 0, color='green', arrow_length_ratio=0.15, linewidth=2)
+    ax.quiver(*origin, 0, 0, axis_len, color='blue', arrow_length_ratio=0.15, linewidth=2)
 
-    print(f"\nScene center: {center}")
-    print(f"Scene extent: {extent:.4f}m")
+    # Equal aspect ratio
+    all_pts = np.vstack(all_plot_points)
+    set_equal_aspect(ax, all_pts)
 
-    # Draw
+    ax.set_xlabel('X (m)')
+    ax.set_ylabel('Y (m)')
+    ax.set_zlabel('Z (m)')
+    ax.set_title(f'NBV Waypoints ({n} poses)\n'
+                 f'Green = first, Red = last, Orange = trajectory')
+    ax.legend(loc='upper left', fontsize=8)
+
     print(f"\nShowing {n} waypoints. Close the window to exit.")
-    print("  Green frustum = first waypoint")
-    print("  Red frustum = last waypoint")
+    print("  Green = first waypoint, Red = last waypoint")
     print("  Orange line = trajectory path")
+    print("  Drag to rotate, scroll to zoom.")
 
-    vis = o3d.visualization.Visualizer()
-    vis.create_window(window_name=f"NBV Waypoints ({n} poses)",
-                      width=1280, height=720)
-
-    for g in geometries:
-        vis.add_geometry(g)
-
-    # White background so lines and frustums are visible
-    opt = vis.get_render_option()
-    opt.background_color = np.array([1.0, 1.0, 1.0])
-    opt.line_width = 2.0
-    opt.point_size = 3.0
-
-    # Set the camera to look at the scene center from a reasonable distance
-    ctr = vis.get_view_control()
-    ctr.set_lookat(center)
-    ctr.set_front([0.0, -0.3, -1.0])   # look roughly from above-front
-    ctr.set_up([0.0, -1.0, 0.0])
-    ctr.set_zoom(0.5)
-
-    vis.run()
-    vis.destroy_window()
+    plt.tight_layout()
+    plt.show()
 
 
 if __name__ == "__main__":
