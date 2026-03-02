@@ -6,117 +6,156 @@ ROS 2 Humble package for Next-Best-View (NBV) trajectory optimization on the KUK
 
 ## Prerequisites
 
-- ROS 2 Humble
+- Ubuntu 22.04 + ROS 2 Humble
 - Python 3.9+
-- The `nbv_planner` library (the core planning engine)
-
-### Python dependencies (installed with `nbv_planner`)
-
-```
-numpy >= 1.24
-scipy >= 1.10
-trimesh >= 4.0
-open3d >= 0.17
-pyyaml >= 6.0
-```
+- The `nbv_planner` library (included in this repo)
 
 ---
 
-## Setup on a Fresh Linux System (Ubuntu 22.04 + ROS 2 Humble)
+## Setup (Fresh Linux Machine)
 
-### 0. Make sure ROS 2 Humble is installed
+### 1. Install ROS 2 Humble
 
 ```bash
-# Verify:
 source /opt/ros/humble/setup.bash
-ros2 --version
+ros2 --version  # verify
 ```
 
-If not installed, follow the [official install guide](https://docs.ros.org/en/humble/Installation/Ubuntu-Install-Debs.html).
+If not installed: [official guide](https://docs.ros.org/en/humble/Installation/Ubuntu-Install-Debs.html).
 
-### 1. Clone the repo
+### 2. Clone the repo
 
 ```bash
 cd ~
 git clone <your-repo-url> traj_optim
 ```
 
-Your repo should look like:
-```
-traj_optim/
-├── nbv_planner/          # Python library
-│   ├── pyproject.toml
-│   ├── src/nbv_planner/
-│   └── data/             # test meshes
-├── nbv_planner_ros/      # ROS 2 package
-│   ├── package.xml
-│   └── ...
-└── TECHNICAL_DETAILS.md
-```
-
-### 2. Install the Python planning library
+### 3. Install the Python planning library + dependencies
 
 ```bash
+# Make sure pip/setuptools are up to date (needs setuptools >= 68)
+pip install --upgrade pip setuptools wheel
+
+# Install the planning engine
 cd ~/traj_optim/nbv_planner
 pip install -e .
+
+# Install rtree (needed by trimesh for raycasting)
+sudo apt install libspatialindex-dev
+pip install rtree
 ```
 
-This installs all Python dependencies (numpy, scipy, trimesh, open3d, etc.) and makes `import nbv_planner` available to the ROS node.
-
-### 3. Create a ROS 2 workspace and symlink the package
+### 4. Create ROS 2 workspace and build
 
 ```bash
 mkdir -p ~/ros2_ws/src
 ln -s ~/traj_optim/nbv_planner_ros ~/ros2_ws/src/nbv_planner_ros
-```
 
-### 4. Build
-
-```bash
 cd ~/ros2_ws
 source /opt/ros/humble/setup.bash
 colcon build --packages-select nbv_planner_ros
 source install/setup.bash
 ```
 
-### 5. Test it works
-
-```bash
-# Run with the bundled test mesh:
-ros2 run nbv_planner_ros nbv_planner_node \
-    --ros-args -p mesh_file_path:=$HOME/traj_optim/nbv_planner/data/bunny_mesh.ply
-
-# In another terminal:
-source ~/ros2_ws/install/setup.bash
-ros2 topic echo /nbv_waypoints --qos-durability transient_local
-```
-
-You should see a PoseArray with ~15-20 waypoints printed out.
-
-> **Tip:** Add `source /opt/ros/humble/setup.bash && source ~/ros2_ws/install/setup.bash` to your `~/.bashrc` so you don't have to source every time.
+> **Tip:** Add to `~/.bashrc`: `source /opt/ros/humble/setup.bash && source ~/ros2_ws/install/setup.bash`
 
 ---
 
-## Quick Start
+## Configure for Your Setup
 
-### Minimal run (node directly)
+**There are three things to configure:** your camera sensor, your robot workspace, and your planner settings. All of these go in a single YAML config file — **not** in the XACRO.
+
+### Why not the XACRO?
+
+Your XACRO/URDF defines the robot's kinematic chain and link geometry (for MoveIt collision checking). The NBV planner needs different information: the camera's optical properties (FOV, resolution, depth range) and the robot's reachable workspace. These are set in the YAML config file.
+
+Your XACRO handles one important thing separately: the **camera-to-end-effector transform**. If your camera is mounted at an offset from `link_7` (e.g., your custom EE link at 0.189m), that transform lives in the XACRO and is used by MoveIt when executing the waypoints — the planner doesn't need it.
+
+### Step-by-step: Create your config
+
+1. **Copy the default config:**
 
 ```bash
-ros2 run nbv_planner_ros nbv_planner_node \
-    --ros-args -p mesh_file_path:=/path/to/your_object.ply
+cp ~/traj_optim/nbv_planner_ros/config/default_params.yaml ~/my_scan_config.yaml
 ```
 
-### With launch file + config
+2. **Edit `~/my_scan_config.yaml`** — here's what to change:
+
+```yaml
+nbv_planner:
+  ros__parameters:
+
+    # ── YOUR OBJECT ───────────────────────────────────────────────
+    mesh_file_path: "/path/to/your_object.ply"
+
+    # ── YOUR CAMERA (from sensor datasheet) ───────────────────────
+    # Example values shown for Intel RealSense D435.
+    # Replace with YOUR camera's specs.
+    camera:
+      width: 640                    # image width in pixels
+      height: 480                   # image height in pixels
+      horizontal_fov_deg: 87.0      # horizontal FOV from spec sheet
+      vertical_fov_deg: 58.0        # vertical FOV from spec sheet
+      min_depth: 0.1                # minimum sensing range (meters)
+      max_depth: 1.0                # maximum sensing range (meters)
+      depth_noise_coeff: 0.001      # depth noise model (sigma = coeff * z^2)
+      planning_subsample: 4         # pixel downsample for speed
+
+    # ── YOUR ROBOT WORKSPACE ──────────────────────────────────────
+    # These define where the planner can place viewpoints.
+    workspace:
+      base_position: [0.0, -0.5, 0.3]   # robot base position in world frame
+      inner_radius: 0.3                   # min reach from base (meters)
+      outer_radius: 0.8                   # max reach from base (meters)
+      object_center: [0.0, 0.0, 0.0]     # [0,0,0] = auto-detect from mesh
+      forbidden_zone_min: [-1.0, -1.0, -0.05]  # table surface AABB min
+      forbidden_zone_max: [1.0, 1.0, 0.0]      # table surface AABB max
+      use_forbidden_zone: true
+
+    # ── PLANNER SETTINGS ──────────────────────────────────────────
+    planner:
+      method: "greedy"              # or "sequence_optimized"
+      max_views: 20
+      num_candidates: 300
+
+    # ── OUTPUT ────────────────────────────────────────────────────
+    output:
+      frame_id: "base_link"
+      save_npy_path: "/tmp/waypoints.npy"  # saves waypoints for later use
+```
+
+### Where to find your camera parameters
+
+| Parameter | Where to get it |
+|---|---|
+| `width`, `height` | Camera resolution setting you use (e.g., 640x480, 1280x720) |
+| `horizontal_fov_deg` | Sensor datasheet. RealSense D435: 87°, D455: 87°, Azure Kinect: 75° |
+| `vertical_fov_deg` | Sensor datasheet. RealSense D435: 58°, D455: 58°, Azure Kinect: 65° |
+| `min_depth`, `max_depth` | Operating range from datasheet. D435: 0.1–10m (but use practical range ~0.1–1.0m) |
+| `depth_noise_coeff` | Noise model coefficient. 0.001 is reasonable for structured-light sensors |
+
+### Where to find your workspace parameters
+
+| Parameter | Where to get it |
+|---|---|
+| `base_position` | Measure your robot base position in the world frame (where `base_link` is) |
+| `inner_radius` | Minimum useful reach — typically 0.2–0.4m for KUKA Med 7 |
+| `outer_radius` | Maximum reach — ~0.8m for KUKA Med 7 (conservative to avoid joint limits) |
+| `object_center` | Leave as `[0,0,0]` for auto-detection, or set manually if you know where the object is |
+| `forbidden_zone_*` | The table/surface your object sits on. Set min/max to an AABB enclosing it |
+
+---
+
+## Run
+
+### Option A: Launch file with config (recommended)
 
 ```bash
-# Copy and edit the default config
-cp $(ros2 pkg prefix nbv_planner_ros)/share/nbv_planner_ros/config/default_params.yaml ~/my_params.yaml
-# Edit ~/my_params.yaml: set mesh_file_path, camera params, workspace params, etc.
-
-ros2 launch nbv_planner_ros nbv_planner.launch.py config_file:=$HOME/my_params.yaml
+ros2 launch nbv_planner_ros nbv_planner.launch.py \
+    config_file:=$HOME/my_scan_config.yaml
 ```
 
-### Override individual parameters on the CLI
+### Option B: Direct node with CLI overrides
 
 ```bash
 ros2 run nbv_planner_ros nbv_planner_node --ros-args \
@@ -125,24 +164,29 @@ ros2 run nbv_planner_ros nbv_planner_node --ros-args \
     -p planner.max_views:=15 \
     -p camera.horizontal_fov_deg:=69.0 \
     -p camera.vertical_fov_deg:=42.0 \
-    -p workspace.base_position:="[0.0, -0.4, 0.2]" \
-    -p output.frame_id:=base_link
+    -p output.save_npy_path:=/tmp/waypoints.npy
+```
+
+### Option C: Quick test with bundled mesh
+
+```bash
+ros2 run nbv_planner_ros nbv_planner_node \
+    --ros-args -p mesh_file_path:=$HOME/traj_optim/nbv_planner/data/bunny_mesh.ply
 ```
 
 ---
 
-## Reading the Output
+## Read the Output
 
-The node publishes once with **transient_local** (latched) QoS, then spins to keep the message available for late subscribers.
+The node publishes with **transient_local** (latched) QoS, then spins so late subscribers receive the data.
 
 ### Waypoints
 
 ```bash
-# In a separate terminal:
 ros2 topic echo /nbv_waypoints --qos-durability transient_local
 ```
 
-Returns a `geometry_msgs/PoseArray` in `base_link` frame. Each pose is the camera position and orientation (quaternion) in world coordinates. The poses are ordered — execute them sequentially for the planned trajectory.
+Returns `geometry_msgs/PoseArray` in `base_link` frame. Each pose = camera position + orientation (quaternion). Execute them in order.
 
 ### Coverage diagnostics
 
@@ -150,33 +194,52 @@ Returns a `geometry_msgs/PoseArray` in `base_link` frame. Each pose is the camer
 ros2 topic echo /nbv_coverage --qos-durability transient_local
 ```
 
-Returns a `std_msgs/String` with JSON:
+Returns JSON with method, num_views, final_coverage, per-frame metrics.
 
-```json
-{
-  "method": "greedy_nbv",
-  "num_views": 18,
-  "total_trajectory_length": 1.234,
-  "final_coverage": 0.923,
-  "per_frame": [
-    {"frame_index": 0, "total_points_in_frame": 4521, "new_unique_points": 4521, "cumulative_coverage": 0.09},
-    {"frame_index": 1, "total_points_in_frame": 3892, "new_unique_points": 3102, "cumulative_coverage": 0.152},
-    ...
-  ]
-}
+### Saved .npy files
+
+If `output.save_npy_path` is set, the node saves:
+- `waypoints.npy` — (N, 7) array: `[x, y, z, qx, qy, qz, qw]` in `base_link` frame
+- `waypoints_4x4.npy` — (N, 4, 4) raw T_cam_world matrices (for full precision)
+
+---
+
+## Visualize Waypoints
+
+Use the bundled visualization script to inspect generated waypoints:
+
+```bash
+# Basic — just waypoints
+python3 ~/traj_optim/nbv_planner_ros/scripts/visualize_waypoints.py /tmp/waypoints.npy
+
+# With the target mesh overlay
+python3 ~/traj_optim/nbv_planner_ros/scripts/visualize_waypoints.py /tmp/waypoints.npy \
+    --mesh /path/to/object.ply
+
+# Using raw 4x4 matrices
+python3 ~/traj_optim/nbv_planner_ros/scripts/visualize_waypoints.py /tmp/waypoints_4x4.npy \
+    --raw4x4 --mesh /path/to/object.ply
+
+# Adjust frustum size
+python3 ~/traj_optim/nbv_planner_ros/scripts/visualize_waypoints.py /tmp/waypoints.npy \
+    --mesh /path/to/object.ply --frustum-scale 0.06
 ```
+
+Opens an Open3D window showing:
+- **Green frustum** → first waypoint
+- **Red frustum** → last waypoint
+- **Orange line** → trajectory path
+- **Gray mesh** → target object
 
 ---
 
 ## Feeding Waypoints to MoveIt
 
-The PoseArray on `/nbv_waypoints` contains camera poses in the `base_link` frame. To use with MoveIt:
+The PoseArray on `/nbv_waypoints` gives camera poses in `base_link`. To execute with MoveIt:
 
-1. **Subscribe** to `/nbv_waypoints` (use `transient_local` durability QoS to receive the latched message).
-2. **Iterate** through the poses in order.
-3. **Plan + execute** to each pose using `moveit_commander` or the MoveIt C++ API.
-
-Example subscriber snippet:
+1. **Subscribe** with `transient_local` QoS
+2. **Iterate** through poses in order
+3. **Plan + execute** to each pose
 
 ```python
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
@@ -188,23 +251,23 @@ qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
 self.create_subscription(PoseArray, '/nbv_waypoints', self.waypoints_cb, qos)
 ```
 
-**Camera frame convention**: poses use the optical frame convention (Z-forward, X-right, Y-down). If your MoveIt end-effector frame differs, apply your camera-to-EE static transform (defined in your URDF/XACRO).
+**Camera frame convention:** Published poses use the optical frame convention (Z-forward, X-right, Y-down). If your MoveIt end-effector frame differs from the camera optical frame, apply the static transform defined in your URDF/XACRO. For example, if your camera is mounted on a custom EE link, MoveIt already knows the `camera_optical_frame → end_effector` transform from the XACRO — just plan to the poses using the camera optical frame as your planning frame, or manually transform using your known camera-to-EE offset.
 
 ---
 
-## Parameters Reference
+## Full Parameter Reference
 
-All parameters live under the `nbv_planner` node namespace. Set them via YAML config or `--ros-args -p`.
+All parameters under the `nbv_planner` node. Set via YAML config or `--ros-args -p`.
 
-### Scene (input data)
+### Scene
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `mesh_file_path` | string | `""` | **Required.** Path to `.ply` mesh file. |
-| `points_file_path` | string | `""` | Optional `.npy` with ground truth points `(N,3)`. If empty, sampled from mesh. |
-| `normals_file_path` | string | `""` | Optional `.npy` with surface normals `(N,3)`. If empty, estimated from mesh. |
-| `scene_name` | string | `"custom_scene"` | Label for logging. |
-| `num_sample_points` | int | `50000` | Points to sample from mesh if no `points_file_path`. |
+| `mesh_file_path` | string | `""` | **Required.** Path to `.ply` mesh file |
+| `points_file_path` | string | `""` | Optional `.npy` with ground truth points `(N,3)` |
+| `normals_file_path` | string | `""` | Optional `.npy` with normals `(N,3)` |
+| `scene_name` | string | `"custom_scene"` | Label for logging |
+| `num_sample_points` | int | `50000` | Points to sample if no `points_file_path` |
 
 ### Camera
 
@@ -216,8 +279,8 @@ All parameters live under the `nbv_planner` node namespace. Set them via YAML co
 | `camera.vertical_fov_deg` | double | `58.0` | Vertical FOV (degrees) |
 | `camera.min_depth` | double | `0.1` | Min sensing range (m) |
 | `camera.max_depth` | double | `1.0` | Max sensing range (m) |
-| `camera.depth_noise_coeff` | double | `0.001` | Noise model: sigma_z = coeff * z^2 |
-| `camera.planning_subsample` | int | `4` | Pixel downsample for fast scoring |
+| `camera.depth_noise_coeff` | double | `0.001` | Noise: sigma_z = coeff * z² |
+| `camera.planning_subsample` | int | `4` | Pixel downsample for scoring |
 
 ### Workspace
 
@@ -227,9 +290,9 @@ All parameters live under the `nbv_planner` node namespace. Set them via YAML co
 | `workspace.inner_radius` | double | `0.3` | Min reach (m) |
 | `workspace.outer_radius` | double | `0.8` | Max reach (m) |
 | `workspace.min_camera_angle_to_target` | double | `0.5` | cos(angle) threshold |
-| `workspace.object_center` | double[] | `[0,0,0]` | Object center. `[0,0,0]` = auto from mesh. |
-| `workspace.forbidden_zone_min` | double[] | `[-1,-1,-0.05]` | Forbidden zone AABB min |
-| `workspace.forbidden_zone_max` | double[] | `[1,1,0]` | Forbidden zone AABB max |
+| `workspace.object_center` | double[] | `[0,0,0]` | Object center (`[0,0,0]` = auto) |
+| `workspace.forbidden_zone_min` | double[] | `[-1,-1,-0.05]` | Forbidden AABB min |
+| `workspace.forbidden_zone_max` | double[] | `[1,1,0]` | Forbidden AABB max |
 | `workspace.use_forbidden_zone` | bool | `true` | Enable table collision zone |
 
 ### Planner
@@ -238,21 +301,22 @@ All parameters live under the `nbv_planner` node namespace. Set them via YAML co
 |---|---|---|---|
 | `planner.method` | string | `"greedy"` | `"greedy"` or `"sequence_optimized"` |
 | `planner.max_views` | int | `20` | Maximum waypoints |
-| `planner.num_candidates` | int | `300` | Candidate viewpoints per iteration |
-| `planner.convergence_threshold` | double | `0.01` | Greedy only: stop when gain < threshold |
-| `planner.coverage_weight` | double | `1.0` | Weight for new-point discovery (alpha) |
-| `planner.density_weight` | double | `0.1` | Weight for total visible points (beta) |
+| `planner.num_candidates` | int | `300` | Candidates per iteration |
+| `planner.convergence_threshold` | double | `0.01` | Greedy: stop when gain < this |
+| `planner.coverage_weight` | double | `1.0` | Weight for new-point discovery |
+| `planner.density_weight` | double | `0.1` | Weight for total visible points |
 | `planner.neighbor_threshold` | double | `0.003` | Coverage distance threshold (m) |
-| `planner.min_angular_separation_deg` | double | `15.0` | Sequence optimizer: min viewpoint separation |
-| `planner.random_seed` | int | `42` | RNG seed for reproducibility |
+| `planner.min_angular_separation_deg` | double | `15.0` | Sequence optimizer only |
+| `planner.random_seed` | int | `42` | RNG seed |
 
 ### Output
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `output.waypoints_topic` | string | `"/nbv_waypoints"` | PoseArray topic name |
+| `output.waypoints_topic` | string | `"/nbv_waypoints"` | PoseArray topic |
 | `output.coverage_topic` | string | `"/nbv_coverage"` | Coverage diagnostics topic |
 | `output.frame_id` | string | `"base_link"` | TF frame for published poses |
+| `output.save_npy_path` | string | `""` | Save waypoints to .npy (empty = don't save) |
 
 ---
 
@@ -260,21 +324,30 @@ All parameters live under the `nbv_planner` node namespace. Set them via YAML co
 
 | Topic | Type | QoS | Description |
 |---|---|---|---|
-| `/nbv_waypoints` | `geometry_msgs/PoseArray` | transient_local, reliable | Ordered camera waypoints |
-| `/nbv_coverage` | `std_msgs/String` | transient_local, reliable | JSON coverage diagnostics |
+| `/nbv_waypoints` | `geometry_msgs/PoseArray` | transient_local | Ordered camera waypoints |
+| `/nbv_coverage` | `std_msgs/String` | transient_local | JSON coverage diagnostics |
 
 ---
 
 ## Troubleshooting
 
 **`ImportError: nbv_planner library not found`**
-Run `pip install -e /path/to/traj_optim/nbv_planner` in the same Python environment ROS 2 uses.
+→ `pip install -e ~/traj_optim/nbv_planner`
 
 **`mesh_file_path is required`**
-The planner needs a mesh for raycasting. Provide a `.ply` file path.
+→ Provide a `.ply` file path in config or via `-p mesh_file_path:=...`
 
-**Late subscriber doesn't receive the PoseArray**
-Your subscriber must use `transient_local` durability QoS to receive latched messages. See the example above.
+**`build backend is missing the build_editable hook`**
+→ `pip install --upgrade pip setuptools wheel` (need setuptools >= 68)
+
+**`ModuleNotFoundError: rtree`**
+→ `sudo apt install libspatialindex-dev && pip install rtree`
+
+**PLY has 0 faces (point cloud)**
+→ The node auto-reconstructs a mesh via Poisson reconstruction. This is normal.
+
+**Late subscriber doesn't receive PoseArray**
+→ Your subscriber must use `transient_local` durability QoS.
 
 **Poses seem rotated relative to my EE frame**
-The published poses use optical frame convention (Z-forward). Apply your camera-to-EE transform from your URDF.
+→ Published poses use optical frame convention (Z-forward). Apply your camera-to-EE transform from your URDF.

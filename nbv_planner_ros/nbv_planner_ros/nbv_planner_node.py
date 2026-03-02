@@ -73,6 +73,11 @@ class NbvPlannerNode(Node):
         self._waypoints_pub.publish(pose_array)
         self._publish_coverage_info(result)
 
+        # Save waypoints to .npy if path is provided
+        save_path = self.get_parameter("output.save_npy_path").value
+        if save_path:
+            self._save_waypoints_npy(pose_array, result.poses, save_path)
+
         self.get_logger().info(
             f"Published {result.num_views} waypoints on '{waypoints_topic}' "
             f"(frame: {frame_id}). "
@@ -128,6 +133,7 @@ class NbvPlannerNode(Node):
         self.declare_parameter("output.waypoints_topic", "/nbv_waypoints")
         self.declare_parameter("output.coverage_topic", "/nbv_coverage")
         self.declare_parameter("output.frame_id", "base_link")
+        self.declare_parameter("output.save_npy_path", "")
 
     # ------------------------------------------------------------------
     # Scene loading
@@ -404,6 +410,44 @@ class NbvPlannerNode(Node):
         msg = String()
         msg.data = json.dumps(data, indent=2)
         self._coverage_pub.publish(msg)
+
+    def _save_waypoints_npy(self, pose_array, t_cam_world_list, save_path):
+        """Save waypoints to .npy file.
+
+        Saves an (N, 7) array where each row is [x, y, z, qx, qy, qz, qw]
+        representing the camera pose in the output frame (base_link).
+
+        Also saves the raw 4x4 T_cam_world matrices as waypoints_4x4.npy
+        alongside the main file for full-precision recovery.
+        """
+        from scipy.spatial.transform import Rotation
+
+        n = len(pose_array.poses)
+        waypoints = np.zeros((n, 7), dtype=np.float64)
+
+        for i, pose in enumerate(pose_array.poses):
+            waypoints[i, 0] = pose.position.x
+            waypoints[i, 1] = pose.position.y
+            waypoints[i, 2] = pose.position.z
+            waypoints[i, 3] = pose.orientation.x
+            waypoints[i, 4] = pose.orientation.y
+            waypoints[i, 5] = pose.orientation.z
+            waypoints[i, 6] = pose.orientation.w
+
+        np.save(save_path, waypoints)
+        self.get_logger().info(
+            f"Saved {n} waypoints to {save_path}  "
+            f"shape: ({n}, 7) = [x, y, z, qx, qy, qz, qw]"
+        )
+
+        # Also save raw 4x4 poses for full-precision round-trip
+        raw_path = save_path.replace(".npy", "_4x4.npy")
+        poses_4x4 = np.stack(t_cam_world_list, axis=0)  # (N, 4, 4)
+        np.save(raw_path, poses_4x4)
+        self.get_logger().info(
+            f"Saved raw T_cam_world matrices to {raw_path}  "
+            f"shape: {poses_4x4.shape}"
+        )
 
 
 def main(args=None):
