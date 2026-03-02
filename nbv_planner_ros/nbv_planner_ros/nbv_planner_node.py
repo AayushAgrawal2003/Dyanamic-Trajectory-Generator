@@ -162,18 +162,14 @@ class NbvPlannerNode(Node):
 
         if points_path:
             self.get_logger().info(f"Loading ground truth points from: {points_path}")
-            points = np.load(points_path, allow_pickle=True)
-            # Handle object arrays (e.g. saved with allow_pickle=True)
-            if points.dtype == object:
-                points = np.array(points.tolist(), dtype=np.float64)
-            points = np.asarray(points, dtype=np.float64)
-            if points.ndim == 1:
-                points = points.reshape(-1, 3)
+            points, normals_from_file = self._load_npy_points(points_path)
             if normals_path:
-                normals = np.load(normals_path, allow_pickle=True)
-                if normals.dtype == object:
-                    normals = np.array(normals.tolist(), dtype=np.float64)
-                normals = np.asarray(normals, dtype=np.float64)
+                normals, _ = self._load_npy_points(normals_path)
+            elif normals_from_file is not None:
+                normals = normals_from_file
+                self.get_logger().info(
+                    f"Found normals inside npy file: {normals.shape}"
+                )
             else:
                 self.get_logger().info(
                     "No normals file provided, estimating from mesh faces."
@@ -299,6 +295,73 @@ class NbvPlannerNode(Node):
         )
         mesh.fix_normals()
         return mesh
+
+    def _load_npy_points(self, path: str):
+        """Load points from a .npy file, handling various formats.
+
+        Handles:
+        - Plain (N,3) float array
+        - Pickled dict with keys like 'points', 'xyz', 'positions', etc.
+        - Pickled dict that also contains 'normals'
+        - 0-d object array wrapping a dict
+
+        Returns:
+            (points, normals_or_None)  —  both as float64 arrays
+        """
+        raw = np.load(path, allow_pickle=True)
+        normals = None
+
+        # 0-d array wrapping a dict: np.save({...}) produces this
+        if raw.ndim == 0:
+            raw = raw.item()
+
+        if isinstance(raw, dict):
+            self.get_logger().info(
+                f"NPY is a dict with keys: {list(raw.keys())}"
+            )
+            # Try common key names for points
+            pts_keys = ['points', 'xyz', 'positions', 'vertices',
+                        'point_cloud', 'coords', 'pcd']
+            points = None
+            for k in pts_keys:
+                if k in raw:
+                    points = np.asarray(raw[k], dtype=np.float64)
+                    self.get_logger().info(f"Using key '{k}' for points")
+                    break
+            if points is None:
+                # Fall back: grab the first value that looks like (N,3)
+                for k, v in raw.items():
+                    try:
+                        arr = np.asarray(v, dtype=np.float64)
+                        if arr.ndim == 2 and arr.shape[1] == 3:
+                            points = arr
+                            self.get_logger().info(
+                                f"Using key '{k}' for points (shape {arr.shape})"
+                            )
+                            break
+                    except (ValueError, TypeError):
+                        continue
+            if points is None:
+                raise ValueError(
+                    f"Cannot find point data in {path}. "
+                    f"Dict keys: {list(raw.keys())}. "
+                    f"Expected a key like 'points' with an (N,3) array."
+                )
+
+            # Check for normals in the same dict
+            norm_keys = ['normals', 'normal', 'norms']
+            for k in norm_keys:
+                if k in raw:
+                    normals = np.asarray(raw[k], dtype=np.float64)
+                    break
+        else:
+            points = np.asarray(raw, dtype=np.float64)
+
+        if points.ndim == 1:
+            points = points.reshape(-1, 3)
+
+        self.get_logger().info(f"Loaded points: {points.shape}")
+        return points, normals
 
     # ------------------------------------------------------------------
     # Component creation
