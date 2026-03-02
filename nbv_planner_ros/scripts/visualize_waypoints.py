@@ -157,16 +157,52 @@ def main():
     traj = create_trajectory_line(poses, color=[1.0, 0.5, 0.0])
     geometries.append(traj)
 
+    # Compute scene bounding box to set a good initial viewpoint
+    all_points = []
+    for g in geometries:
+        if hasattr(g, 'points') and len(g.points) > 0:
+            all_points.append(np.asarray(g.points))
+        if hasattr(g, 'vertices') and len(g.vertices) > 0:
+            all_points.append(np.asarray(g.vertices))
+    if all_points:
+        all_pts = np.vstack(all_points)
+        center = all_pts.mean(axis=0)
+        extent = np.linalg.norm(all_pts.max(axis=0) - all_pts.min(axis=0))
+    else:
+        center = np.zeros(3)
+        extent = 1.0
+
+    print(f"\nScene center: {center}")
+    print(f"Scene extent: {extent:.4f}m")
+
     # Draw
     print(f"\nShowing {n} waypoints. Close the window to exit.")
     print("  Green frustum = first waypoint")
     print("  Red frustum = last waypoint")
     print("  Orange line = trajectory path")
-    o3d.visualization.draw_geometries(
-        geometries,
-        window_name=f"NBV Waypoints ({n} poses)",
-        width=1280, height=720,
-    )
+
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(window_name=f"NBV Waypoints ({n} poses)",
+                      width=1280, height=720)
+
+    for g in geometries:
+        vis.add_geometry(g)
+
+    # White background so lines and frustums are visible
+    opt = vis.get_render_option()
+    opt.background_color = np.array([1.0, 1.0, 1.0])
+    opt.line_width = 2.0
+    opt.point_size = 3.0
+
+    # Set the camera to look at the scene center from a reasonable distance
+    ctr = vis.get_view_control()
+    ctr.set_lookat(center)
+    ctr.set_front([0.0, -0.3, -1.0])   # look roughly from above-front
+    ctr.set_up([0.0, -1.0, 0.0])
+    ctr.set_zoom(0.5)
+
+    vis.run()
+    vis.destroy_window()
 
 
 if __name__ == "__main__":
