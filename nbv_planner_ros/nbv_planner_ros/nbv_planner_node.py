@@ -9,6 +9,7 @@ import json
 import time
 
 import numpy as np
+import open3d as o3d
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -147,28 +148,10 @@ class NbvPlannerNode(Node):
             raise ValueError("mesh_file_path is required")
 
         self.get_logger().info(f"Loading mesh from: {mesh_path}")
-        loaded = trimesh.load(mesh_path, force="mesh")
-
-        # trimesh.load with force="mesh" can still return a Scene if the
-        # file contains multiple meshes. Concatenate into a single Trimesh.
-        if isinstance(loaded, trimesh.Scene):
-            meshes = [g for g in loaded.geometry.values()
-                      if isinstance(g, trimesh.Trimesh)]
-            if not meshes:
-                self.get_logger().fatal(
-                    f"No triangle geometry found in {mesh_path}"
-                )
-                raise ValueError("Mesh file contains no triangles")
-            mesh = trimesh.util.concatenate(meshes)
-            self.get_logger().info(
-                f"Concatenated {len(meshes)} sub-meshes into one "
-                f"({len(mesh.faces)} faces)."
-            )
-        else:
-            mesh = loaded
+        mesh = self._load_mesh(mesh_path)
 
         self.get_logger().info(
-            f"Mesh loaded: {len(mesh.vertices)} vertices, {len(mesh.faces)} faces"
+            f"Mesh ready: {len(mesh.vertices)} vertices, {len(mesh.faces)} faces"
         )
 
         if points_path:
@@ -184,8 +167,6 @@ class NbvPlannerNode(Node):
                     trimesh.proximity.closest_point(mesh, points)
 
                 # face_idx == -1 means the point had no valid closest face.
-                # This happens when points are far from the mesh or the mesh
-                # has degenerate faces. Replace bad indices with 0 and log.
                 bad_mask = face_idx < 0
                 n_bad = int(bad_mask.sum())
                 if n_bad > 0:
@@ -220,6 +201,89 @@ class NbvPlannerNode(Node):
             ground_truth_normals=normals,
             bounding_box=bbox,
         )
+
+    def _load_mesh(self, mesh_path: str) -> trimesh.Trimesh:
+        """Load a mesh from file, reconstructing from point cloud if needed.
+
+        Handles three cases:
+        1. Normal triangle mesh (.ply/.stl/.obj with faces) -> use directly
+        2. Multi-body scene -> concatenate into single mesh
+        3. Point cloud PLY (vertices only, no faces) -> reconstruct via
+           Open3D Poisson surface reconstruction
+        """
+        loaded = trimesh.load(mesh_path, force="mesh")
+
+        # Handle Scene with multiple geometries
+        if isinstance(loaded, trimesh.Scene):
+            meshes = [g for g in loaded.geometry.values()
+                      if isinstance(g, trimesh.Trimesh) and len(g.faces) > 0]
+            if meshes:
+                mesh = trimesh.util.concatenate(meshes)
+                self.get_logger().info(
+                    f"Concatenated {len(meshes)} sub-meshes "
+                    f"({len(mesh.faces)} faces)."
+                )
+                return mesh
+            # Fall through to reconstruction if no faces found
+            loaded = trimesh.Trimesh()
+
+        # If we have a valid triangle mesh, return it
+        if isinstance(loaded, trimesh.Trimesh) and len(loaded.faces) > 0:
+            return loaded
+
+        # ----------------------------------------------------------
+        # The file is a point cloud (no faces). Reconstruct a mesh.
+        # ----------------------------------------------------------
+        self.get_logger().warn(
+            "PLY file has no triangle faces — treating as point cloud. "
+            "Reconstructing mesh via Poisson surface reconstruction..."
+        )
+
+        # Load as Open3D point cloud to get vertices (and colors if any)
+        pcd = o3d.io.read_point_cloud(mesh_path)
+        n_pts = len(pcd.points)
+        if n_pts == 0:
+            self.get_logger().fatal(f"File {mesh_path} contains no points.")
+            raise ValueError("Empty point cloud")
+
+        self.get_logger().info(f"Point cloud: {n_pts} points")
+
+        # Estimate normals (required for Poisson reconstruction)
+        if not pcd.has_normals():
+            self.get_logger().info("Estimating normals...")
+            pcd.estimate_normals(
+                search_param=o3d.geometry.KDTreeSearchParamHybrid(
+                    radius=0.01, max_nn=30
+                )
+            )
+            pcd.orient_normals_consistent_tangent_plane(k=15)
+
+        # Poisson surface reconstruction
+        self.get_logger().info("Running Poisson reconstruction (depth=8)...")
+        o3d_mesh, densities = o3d.geometry.TriangleMesh \
+            .create_from_point_cloud_poisson(pcd, depth=8)
+
+        # Remove low-density vertices (reconstruction artifacts far from
+        # the actual point cloud). Keep vertices above the 5th percentile.
+        densities = np.asarray(densities)
+        density_thresh = np.quantile(densities, 0.05)
+        vertices_to_remove = densities < density_thresh
+        o3d_mesh.remove_vertices_by_mask(vertices_to_remove)
+        o3d_mesh.compute_vertex_normals()
+
+        self.get_logger().info(
+            f"Reconstructed mesh: {len(o3d_mesh.vertices)} vertices, "
+            f"{len(o3d_mesh.triangles)} faces"
+        )
+
+        # Convert Open3D mesh -> trimesh
+        mesh = trimesh.Trimesh(
+            vertices=np.asarray(o3d_mesh.vertices),
+            faces=np.asarray(o3d_mesh.triangles),
+            vertex_normals=np.asarray(o3d_mesh.vertex_normals),
+        )
+        mesh.fix_normals()
+        return mesh
 
     # ------------------------------------------------------------------
     # Component creation
