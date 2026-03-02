@@ -1,0 +1,15 @@
+planner:
+  max_views: 20
+  num_candidates: 300
+  coverage_weight: 1.0      # α
+  density_weight: 0.1       # β
+  convergence_threshold: 0.01
+  sphere_sample_radii: [0.2, 0.3, 0.4, 0.5]
+  min_angular_separation_deg: 15.0  # for diversity filtering
+
+voxel_grid:
+  voxel_size: 0.002  # 2mm
+  padding: 0.05      # 5cm padding around object bbox
+
+coverage:
+  neighbor_threshold: 0.003  # 3mm — point is "covered" if observed within this

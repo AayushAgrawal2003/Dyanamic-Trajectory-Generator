@@ -1,0 +1,10 @@
+camera:
+  name: "RealSense D435"
+  width: 640
+  height: 480
+  horizontal_fov_deg: 87.0
+  vertical_fov_deg: 58.0
+  min_depth: 0.1
+  max_depth: 1.0
+  depth_noise_coeff: 0.001  # σ_z = coeff * z^2
+  planning_subsample: 4     # subsample factor for fast scoring

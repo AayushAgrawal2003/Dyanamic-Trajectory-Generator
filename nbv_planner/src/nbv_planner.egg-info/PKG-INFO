@@ -1,0 +1,14 @@
+Metadata-Version: 2.4
+Name: nbv-planner
+Version: 0.1.0
+Summary: Next-Best-View planning for robotic 3D scanning
+Requires-Python: >=3.9
+Requires-Dist: numpy>=1.24
+Requires-Dist: scipy>=1.10
+Requires-Dist: trimesh>=4.0
+Requires-Dist: open3d>=0.17
+Requires-Dist: matplotlib>=3.7
+Requires-Dist: pyyaml>=6.0
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"
+Requires-Dist: pytest-cov; extra == "dev"
