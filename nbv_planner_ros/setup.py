@@ -24,7 +24,6 @@ setup(
     maintainer_email='aayushagrawal@todo.todo',
     description='ROS 2 wrapper for NBV trajectory optimization planner',
     license='MIT',
-    tests_require=['pytest'],
     entry_points={
         'console_scripts': [
             'nbv_planner_node = nbv_planner_ros.nbv_planner_node:main',

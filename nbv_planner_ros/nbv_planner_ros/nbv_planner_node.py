@@ -147,7 +147,29 @@ class NbvPlannerNode(Node):
             raise ValueError("mesh_file_path is required")
 
         self.get_logger().info(f"Loading mesh from: {mesh_path}")
-        mesh = trimesh.load(mesh_path, force="mesh")
+        loaded = trimesh.load(mesh_path, force="mesh")
+
+        # trimesh.load with force="mesh" can still return a Scene if the
+        # file contains multiple meshes. Concatenate into a single Trimesh.
+        if isinstance(loaded, trimesh.Scene):
+            meshes = [g for g in loaded.geometry.values()
+                      if isinstance(g, trimesh.Trimesh)]
+            if not meshes:
+                self.get_logger().fatal(
+                    f"No triangle geometry found in {mesh_path}"
+                )
+                raise ValueError("Mesh file contains no triangles")
+            mesh = trimesh.util.concatenate(meshes)
+            self.get_logger().info(
+                f"Concatenated {len(meshes)} sub-meshes into one "
+                f"({len(mesh.faces)} faces)."
+            )
+        else:
+            mesh = loaded
+
+        self.get_logger().info(
+            f"Mesh loaded: {len(mesh.vertices)} vertices, {len(mesh.faces)} faces"
+        )
 
         if points_path:
             self.get_logger().info(f"Loading ground truth points from: {points_path}")
@@ -158,7 +180,22 @@ class NbvPlannerNode(Node):
                 self.get_logger().info(
                     "No normals file provided, estimating from mesh faces."
                 )
-                _, _, face_idx = trimesh.proximity.closest_point(mesh, points)
+                closest_pts, distances, face_idx = \
+                    trimesh.proximity.closest_point(mesh, points)
+
+                # face_idx == -1 means the point had no valid closest face.
+                # This happens when points are far from the mesh or the mesh
+                # has degenerate faces. Replace bad indices with 0 and log.
+                bad_mask = face_idx < 0
+                n_bad = int(bad_mask.sum())
+                if n_bad > 0:
+                    self.get_logger().warn(
+                        f"{n_bad}/{len(points)} points had no matching mesh "
+                        f"face (max dist: {distances[bad_mask].max():.4f}m). "
+                        f"Using face 0 normals as fallback for those points."
+                    )
+                    face_idx[bad_mask] = 0
+
                 normals = mesh.face_normals[face_idx]
             bbox = np.array([points.min(axis=0), points.max(axis=0)])
         else:
